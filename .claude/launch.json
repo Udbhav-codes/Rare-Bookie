@@ -1,0 +1,19 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "rare-bookie-dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "C:\\Users\\Admin\\Downloads\\rare-bookie",
+        "run",
+        "dev",
+        "--",
+        "-p",
+        "3300"
+      ],
+      "port": 3300
+    }
+  ]
+}
