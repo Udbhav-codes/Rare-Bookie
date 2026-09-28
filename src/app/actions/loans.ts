@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { assertAdmin, NotAdminError } from "@/lib/auth";
-import { get, run, transaction } from "@/lib/db";
+import { SCHEMA, transaction } from "@/lib/db";
 import type { ActionState } from "@/lib/types";
 import { daysBetween, formatDate, todayISO } from "@/lib/utils";
 
@@ -34,26 +34,37 @@ export async function issueBook(_prev: ActionState, fd: FormData): Promise<Actio
     else if (isDate(lend) && daysBetween(lend, due) < 0) errors.due_date = "The due date can't be before the lending date.";
     if (Object.keys(errors).length) return { errors };
 
-    const title = transaction(() => {
-      const book = get<{ title: string; available_copies: number }>("SELECT title, available_copies FROM books WHERE id = ?", bookId);
+    const title = await transaction(async (q) => {
+      const book = await q.get<{ title: string; available_copies: number }>(
+        `SELECT title, available_copies FROM ${SCHEMA}.books WHERE id = ? FOR UPDATE`,
+        bookId,
+      );
       if (!book) throw new Error("!That book no longer exists. Pick another one.");
       if (book.available_copies < 1) throw new Error(`!Every copy of “${book.title}” is already lent out.`);
 
       // Borrowers are identified by name, plus the member number when one is given.
       const existing = memberId
-        ? get<{ id: number }>("SELECT id FROM borrowers WHERE lower(member_id) = lower(?)", memberId)
-        : get<{ id: number }>("SELECT id FROM borrowers WHERE lower(name) = lower(?) AND member_id IS NULL", name);
+        ? await q.get<{ id: number }>(`SELECT id FROM ${SCHEMA}.borrowers WHERE lower(member_id) = lower(?)`, memberId)
+        : await q.get<{ id: number }>(`SELECT id FROM ${SCHEMA}.borrowers WHERE lower(name) = lower(?) AND member_id IS NULL`, name);
       let borrowerId: number;
       if (existing) {
         borrowerId = existing.id;
-        run("UPDATE borrowers SET name = ?, member_id = COALESCE(NULLIF(?, ''), member_id) WHERE id = ?", name, memberId, borrowerId);
-      } else {
-        borrowerId = Number(
-          run("INSERT INTO borrowers(name, member_id, phone) VALUES (?, ?, '')", name, memberId || null).lastInsertRowid,
+        await q.run(
+          `UPDATE ${SCHEMA}.borrowers SET name = ?, member_id = COALESCE(NULLIF(?, ''), member_id) WHERE id = ?`,
+          name,
+          memberId,
+          borrowerId,
         );
+      } else {
+        const inserted = await q.get<{ id: number }>(
+          `INSERT INTO ${SCHEMA}.borrowers(name, member_id, phone) VALUES (?, ?, '') RETURNING id`,
+          name,
+          memberId || null,
+        );
+        borrowerId = inserted!.id;
       }
-      run(
-        `INSERT INTO loans(book_id, book_title, borrower_id, lend_date, due_date, status, notes, issued_by, created_at)
+      await q.run(
+        `INSERT INTO ${SCHEMA}.loans(book_id, book_title, borrower_id, lend_date, due_date, status, notes, issued_by, created_at)
          VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
         bookId,
         book.title,
@@ -64,7 +75,7 @@ export async function issueBook(_prev: ActionState, fd: FormData): Promise<Actio
         admin.id,
         new Date().toISOString(),
       );
-      run("UPDATE books SET available_copies = available_copies - 1 WHERE id = ?", bookId);
+      await q.run(`UPDATE ${SCHEMA}.books SET available_copies = available_copies - 1 WHERE id = ?`, bookId);
       return book.title;
     });
 
@@ -89,17 +100,19 @@ export async function returnBook(_prev: ActionState, fd: FormData): Promise<Acti
     if (!["Good", "Damaged", "Lost"].includes(condition)) errors.condition = "Choose the book's condition.";
     if (Object.keys(errors).length) return { errors };
 
-    const result = transaction(() => {
-      const loan = get<{ book_id: number | null; book_title: string; lend_date: string; status: string; name: string }>(
-        "SELECT l.book_id, l.book_title, l.lend_date, l.status, b.name FROM loans l JOIN borrowers b ON b.id = l.borrower_id WHERE l.id = ?",
+    const result = await transaction(async (q) => {
+      const loan = await q.get<{ book_id: number | null; book_title: string; lend_date: string; status: string; name: string }>(
+        `SELECT l.book_id, l.book_title, l.lend_date, l.status, br.name
+         FROM ${SCHEMA}.loans l JOIN ${SCHEMA}.borrowers br ON br.id = l.borrower_id WHERE l.id = ?`,
         loanId,
       );
       if (!loan) throw new Error("!That loan record wasn't found.");
       if (loan.status !== "active") throw new Error(`!“${loan.book_title}” has already been marked as returned.`);
       if (daysBetween(loan.lend_date, returnDate) < 0) throw new Error("!The return date can't be before the lending date.");
 
-      run(
-        "UPDATE loans SET status = 'returned', return_date = ?, condition_on_return = ?, return_remarks = ?, returned_at = ? WHERE id = ?",
+      await q.run(
+        `UPDATE ${SCHEMA}.loans SET status = 'returned', return_date = ?, condition_on_return = ?, return_remarks = ?, returned_at = ?
+         WHERE id = ?`,
         returnDate,
         condition,
         remarks || null,
@@ -108,8 +121,13 @@ export async function returnBook(_prev: ActionState, fd: FormData): Promise<Acti
       );
       if (loan.book_id) {
         // A lost copy leaves the collection; good or damaged copies go back on the shelf.
-        if (condition === "Lost") run("UPDATE books SET total_copies = MAX(total_copies - 1, 0) WHERE id = ?", loan.book_id);
-        else run("UPDATE books SET available_copies = MIN(available_copies + 1, total_copies) WHERE id = ?", loan.book_id);
+        if (condition === "Lost")
+          await q.run(`UPDATE ${SCHEMA}.books SET total_copies = GREATEST(total_copies - 1, 0) WHERE id = ?`, loan.book_id);
+        else
+          await q.run(
+            `UPDATE ${SCHEMA}.books SET available_copies = LEAST(available_copies + 1, total_copies) WHERE id = ?`,
+            loan.book_id,
+          );
       }
       return loan;
     });

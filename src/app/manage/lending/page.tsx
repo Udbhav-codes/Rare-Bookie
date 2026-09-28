@@ -6,8 +6,8 @@ import { LendForm } from "./LendForm";
 
 export const metadata: Metadata = { title: "Lending" };
 
-export default function LendingPage() {
-  const books = getBooks()
+export default async function LendingPage() {
+  const books = (await getBooks())
     .filter((b) => b.available_copies > 0)
     .map(({ id, title, author, isbn, cover_url, rack_number, available_copies, total_copies }) => ({
       id,
@@ -19,8 +19,7 @@ export default function LendingPage() {
       available_copies,
       total_copies,
     }));
-  const loans = getActiveLoans();
-  const { loanDays } = getLibrarySettings();
+  const [loans, { loanDays }] = await Promise.all([getActiveLoans(), getLibrarySettings()]);
 
   return (
     <div className="grid gap-10 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)]">

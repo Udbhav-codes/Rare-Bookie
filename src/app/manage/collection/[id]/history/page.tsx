@@ -11,9 +11,9 @@ export const metadata: Metadata = { title: "Loan history" };
 
 export default async function BookHistoryPage({ params }: PageProps<"/manage/collection/[id]/history">) {
   const { id } = await params;
-  const book = getBook(Number(id));
+  const book = await getBook(Number(id));
   if (!book) notFound();
-  const loans = getLoansForBook(book.id);
+  const loans = await getLoansForBook(book.id);
 
   return (
     <section>

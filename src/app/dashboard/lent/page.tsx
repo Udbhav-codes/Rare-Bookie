@@ -7,8 +7,8 @@ import { formatDate } from "@/lib/utils";
 
 export const metadata: Metadata = { title: "Lent books" };
 
-export default function LentPage() {
-  const loans = getPublicLoans();
+export default async function LentPage() {
+  const loans = await getPublicLoans();
   return (
     <div className="mx-auto max-w-5xl px-4 py-10 sm:px-6">
       <PageHeader eyebrow="Currently out" title="Lent books" back={{ href: "/dashboard", label: "Dashboard" }}>

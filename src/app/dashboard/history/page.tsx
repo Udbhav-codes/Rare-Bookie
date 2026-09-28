@@ -7,8 +7,8 @@ import { formatDate, timeAgo } from "@/lib/utils";
 
 export const metadata: Metadata = { title: "History" };
 
-export default function HistoryPage() {
-  const events = getActivity();
+export default async function HistoryPage() {
+  const events = await getActivity();
   // Group by calendar day for easier scanning.
   const groups = new Map<string, typeof events>();
   for (const e of events) {

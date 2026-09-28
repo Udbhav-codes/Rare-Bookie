@@ -2,13 +2,14 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BookDown, BookPlus, BookUp, Library } from "lucide-react";
+import { BookDown, BookPlus, BookUp, Library, Users } from "lucide-react";
 
 const TABS = [
   { href: "/manage/lending", label: "Lending", icon: BookUp },
   { href: "/manage/return", label: "Return", icon: BookDown },
   { href: "/manage/add", label: "Add", icon: BookPlus },
   { href: "/manage/collection", label: "Collection", icon: Library },
+  { href: "/manage/admins", label: "Admins", icon: Users },
 ];
 
 export function ManageTabs() {

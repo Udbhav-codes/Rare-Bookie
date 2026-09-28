@@ -4,9 +4,8 @@ import { BookForm } from "../BookForm";
 
 export const metadata: Metadata = { title: "Add a book" };
 
-export default function AddPage() {
-  const categories = getCategories();
-  const { rackRows } = getLibrarySettings();
+export default async function AddPage() {
+  const [categories, { rackRows }] = await Promise.all([getCategories(), getLibrarySettings()]);
   return (
     <section aria-labelledby="add-h">
       <h2 id="add-h" className="display text-3xl">

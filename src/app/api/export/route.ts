@@ -12,7 +12,7 @@ function cell(v: unknown): string {
 export async function GET() {
   if (!(await getAdmin())) return new Response("Sign in as admin to export the collection.", { status: 401 });
   const head = ["Title", "Author", "ISBN", "Category", "Rack", "Total copies", "Available", "Publisher", "Year", "Language", "Edition", "Added"];
-  const rows = getBooks().map((b) =>
+  const rows = (await getBooks()).map((b) =>
     [b.title, b.author, b.isbn, b.category, b.rack_number, b.total_copies, b.available_copies, b.publisher, b.year, b.language, b.edition, b.created_at.slice(0, 10)]
       .map(cell)
       .join(","),

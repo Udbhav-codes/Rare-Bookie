@@ -2,7 +2,7 @@
 
 import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
-import { get } from "@/lib/db";
+import { get, SCHEMA } from "@/lib/db";
 import { verifyPassword } from "@/lib/password";
 import { createSessionToken, SESSION_COOKIE, sessionCookieOptions } from "@/lib/session";
 import type { ActionState } from "@/lib/types";
@@ -34,7 +34,10 @@ export async function signIn(_prev: ActionState, formData: FormData): Promise<Ac
   if (!password) errors.password = "Enter your password.";
   if (Object.keys(errors).length) return { errors };
 
-  const admin = get<{ id: number; password_hash: string }>("SELECT id, password_hash FROM admins WHERE email = ?", email);
+  const admin = await get<{ id: number; password_hash: string }>(
+    `SELECT id, password_hash FROM ${SCHEMA}.admins WHERE lower(email) = lower(?)`,
+    email,
+  );
   if (!admin || !verifyPassword(password, admin.password_hash)) {
     recent.push(now);
     failures.set(ip, recent);

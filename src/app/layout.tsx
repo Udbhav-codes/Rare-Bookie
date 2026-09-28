@@ -12,10 +12,14 @@ const mono = Courier_Prime({ weight: ["400", "700"], subsets: ["latin"], variabl
 
 export const dynamic = "force-dynamic";
 
-export const metadata: Metadata = {
-  title: { default: "Rare Bookie", template: "%s · Rare Bookie" },
-  description: "Browse the Rare Bookie library, see what's available and find which rack each book is on.",
-};
+/** Page titles follow the library name set in the database, so renaming needs no code change. */
+export async function generateMetadata(): Promise<Metadata> {
+  const { libraryName } = await getLibrarySettings();
+  return {
+    title: { default: libraryName, template: `%s · ${libraryName}` },
+    description: `Browse the ${libraryName} library, see what's available and find which rack each book is on.`,
+  };
+}
 
 export const viewport: Viewport = {
   themeColor: [

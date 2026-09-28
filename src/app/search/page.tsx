@@ -10,10 +10,9 @@ export const metadata: Metadata = { title: "Search" };
 export default async function SearchPage({ searchParams }: PageProps<"/search">) {
   const { q: raw } = await searchParams;
   const q = (Array.isArray(raw) ? raw[0] : (raw ?? "")).trim().slice(0, 100);
-  const order = searchBooks(q, 200).map((b) => b.id);
-  const byId = new Map(getBooks().map((b) => [b.id, b]));
-  const results = order.map((id) => byId.get(id)!).filter(Boolean);
-  const { rackRows } = getLibrarySettings();
+  const [matches, books, { rackRows }] = await Promise.all([searchBooks(q, 200), getBooks(), getLibrarySettings()]);
+  const byId = new Map(books.map((b) => [b.id, b]));
+  const results = matches.map((m) => byId.get(m.id)!).filter(Boolean);
 
   return (
     <div className="mx-auto max-w-7xl px-4 pb-16 pt-10 sm:px-6">

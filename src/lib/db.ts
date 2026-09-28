@@ -1,125 +1,140 @@
 import "server-only";
-import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import fs from "node:fs";
-import path from "node:path";
-import { seedIfEmpty } from "./seed";
+import { Pool, type PoolClient } from "pg";
+import { hashPassword } from "./password";
 
-export const DATA_DIR = path.join(process.cwd(), "data");
-export const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
+/**
+ * Supabase Postgres (Mumbai). Every table lives in the `rarebookie` schema, so this app
+ * shares a database with other projects without touching their tables.
+ */
+export const SCHEMA = "rarebookie";
 
 declare global {
-  var __rareBookieDb: DatabaseSync | undefined;
+  var __rareBookiePool: Pool | undefined;
+  var __rareBookieReady: Promise<void> | undefined;
 }
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS categories (
-  id INTEGER PRIMARY KEY,
-  name TEXT NOT NULL UNIQUE COLLATE NOCASE
-);
-CREATE TABLE IF NOT EXISTS books (
-  id INTEGER PRIMARY KEY,
-  title TEXT NOT NULL,
-  author TEXT NOT NULL,
-  isbn TEXT,
-  category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
-  publisher TEXT,
-  year INTEGER,
-  edition TEXT,
-  language TEXT,
-  description TEXT,
-  cover_url TEXT,
-  rack_number TEXT NOT NULL,
-  total_copies INTEGER NOT NULL DEFAULT 1 CHECK (total_copies >= 0),
-  available_copies INTEGER NOT NULL DEFAULT 1 CHECK (available_copies >= 0),
-  created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS books_isbn ON books(isbn);
-CREATE TABLE IF NOT EXISTS borrowers (
-  id INTEGER PRIMARY KEY,
-  name TEXT NOT NULL,
-  member_id TEXT,
-  phone TEXT NOT NULL,
-  email TEXT,
-  address TEXT
-);
-CREATE INDEX IF NOT EXISTS borrowers_phone ON borrowers(phone);
-CREATE TABLE IF NOT EXISTS loans (
-  id INTEGER PRIMARY KEY,
-  book_id INTEGER REFERENCES books(id) ON DELETE SET NULL,
-  book_title TEXT NOT NULL,
-  borrower_id INTEGER NOT NULL REFERENCES borrowers(id),
-  lend_date TEXT NOT NULL,
-  due_date TEXT NOT NULL,
-  return_date TEXT,
-  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','returned')),
-  condition_on_return TEXT,
-  notes TEXT,
-  return_remarks TEXT,
-  issued_by INTEGER,
-  created_at TEXT NOT NULL,
-  returned_at TEXT
-);
-CREATE INDEX IF NOT EXISTS loans_status ON loans(status);
-CREATE TABLE IF NOT EXISTS admins (
-  id INTEGER PRIMARY KEY,
-  name TEXT NOT NULL,
-  email TEXT NOT NULL UNIQUE COLLATE NOCASE,
-  password_hash TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS settings (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-`;
-
-export function db(): DatabaseSync {
-  if (!globalThis.__rareBookieDb) {
-    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-    const d = new DatabaseSync(path.join(DATA_DIR, "rarebookie.db"));
-    d.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 3000;");
-    d.exec(SCHEMA);
-    seedIfEmpty(d);
-    globalThis.__rareBookieDb = d;
+function pool(): Pool {
+  if (!globalThis.__rareBookiePool) {
+    const connectionString = process.env.DATABASE_URL;
+    if (!connectionString) throw new Error("DATABASE_URL is not set. Add it to .env.local (local) or the Vercel project settings.");
+    globalThis.__rareBookiePool = new Pool({
+      connectionString,
+      // Serverless functions are short-lived; keep the pool small and let idle links close.
+      max: Number(process.env.PG_POOL_MAX ?? 3),
+      idleTimeoutMillis: 10_000,
+      connectionTimeoutMillis: 15_000,
+      ssl: /localhost|127\.0\.0\.1/.test(connectionString) ? undefined : { rejectUnauthorized: false },
+    });
+    globalThis.__rareBookiePool.on("error", (e) => console.error("Postgres pool error:", e.message));
   }
-  return globalThis.__rareBookieDb;
+  return globalThis.__rareBookiePool;
 }
 
-type Params = SQLInputValue[];
-
-/** node:sqlite returns null-prototype rows; spread them so they can cross to client components. */
-export function all<T>(sql: string, ...params: Params): T[] {
-  return db()
-    .prepare(sql)
-    .all(...params)
-    .map((r) => ({ ...r }) as T);
+/** The queries are written with `?` placeholders; Postgres wants $1, $2, … */
+function toPg(sql: string): string {
+  let i = 0;
+  return sql.replace(/\?/g, () => `$${++i}`);
 }
 
-export function get<T>(sql: string, ...params: Params): T | undefined {
-  const row = db().prepare(sql).get(...params);
-  return row ? ({ ...row } as T) : undefined;
+type Runner = { query: (text: string, values: unknown[]) => Promise<{ rows: Record<string, unknown>[]; rowCount: number | null }> };
+
+export type Querier = {
+  all<T>(sql: string, ...params: unknown[]): Promise<T[]>;
+  get<T>(sql: string, ...params: unknown[]): Promise<T | undefined>;
+  run(sql: string, ...params: unknown[]): Promise<{ rows: Record<string, unknown>[]; rowCount: number }>;
+};
+
+function querier(runner: Runner): Querier {
+  return {
+    async all<T>(sql: string, ...params: unknown[]) {
+      const r = await runner.query(toPg(sql), params);
+      return r.rows as T[];
+    },
+    async get<T>(sql: string, ...params: unknown[]) {
+      const r = await runner.query(toPg(sql), params);
+      return (r.rows[0] as T | undefined) ?? undefined;
+    },
+    async run(sql: string, ...params: unknown[]) {
+      const r = await runner.query(toPg(sql), params);
+      return { rows: r.rows, rowCount: r.rowCount ?? 0 };
+    },
+  };
 }
 
-export function run(sql: string, ...params: Params) {
-  return db().prepare(sql).run(...params);
+export async function all<T>(sql: string, ...params: unknown[]): Promise<T[]> {
+  await ready();
+  return querier(pool()).all<T>(sql, ...params);
 }
 
-export function transaction<T>(fn: () => T): T {
-  const d = db();
-  d.exec("BEGIN IMMEDIATE");
+export async function get<T>(sql: string, ...params: unknown[]): Promise<T | undefined> {
+  await ready();
+  return querier(pool()).get<T>(sql, ...params);
+}
+
+export async function run(sql: string, ...params: unknown[]) {
+  await ready();
+  return querier(pool()).run(sql, ...params);
+}
+
+/** Runs `fn` inside a transaction on a single connection. */
+export async function transaction<T>(fn: (q: Querier) => Promise<T>): Promise<T> {
+  await ready();
+  const client: PoolClient = await pool().connect();
   try {
-    const out = fn();
-    d.exec("COMMIT");
+    await client.query("BEGIN");
+    const out = await fn(querier(client));
+    await client.query("COMMIT");
     return out;
   } catch (e) {
-    d.exec("ROLLBACK");
+    await client.query("ROLLBACK").catch(() => {});
     throw e;
+  } finally {
+    client.release();
   }
 }
 
-export function getSetting(key: string, fallback: string): string {
-  return get<{ value: string }>("SELECT value FROM settings WHERE key = ?", key)?.value ?? fallback;
+export async function getSetting(key: string, fallback: string): Promise<string> {
+  const row = await get<{ value: string }>(`SELECT value FROM ${SCHEMA}.settings WHERE key = ?`, key);
+  return row?.value ?? fallback;
 }
 
-export function setSetting(key: string, value: string) {
-  run("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", key, value);
+export async function setSetting(key: string, value: string) {
+  await run(
+    `INSERT INTO ${SCHEMA}.settings(key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+    key,
+    value,
+  );
+}
+
+/**
+ * Bootstraps the first admin account from the environment variables. Passwords set inside the
+ * app are never overwritten — set ADMIN_PASSWORD_RESET=1 to force this account's password back
+ * to ADMIN_PASSWORD on the next start (the way back in if everyone is locked out).
+ */
+async function ensureAdmin() {
+  const email = (process.env.ADMIN_EMAIL || "admin@rarebookie.local").trim();
+  const name = process.env.ADMIN_NAME || "Librarian";
+  const password = process.env.ADMIN_PASSWORD || "rarebookie";
+  const q = querier(pool());
+  const existing = await q.get<{ id: number }>(`SELECT id FROM ${SCHEMA}.admins WHERE lower(email) = lower(?)`, email);
+  if (!existing) {
+    await q.run(
+      `INSERT INTO ${SCHEMA}.admins(name, email, password_hash, created_at) VALUES (?, ?, ?, ?)`,
+      name,
+      email,
+      hashPassword(password),
+      new Date().toISOString(),
+    );
+  } else if (process.env.ADMIN_PASSWORD_RESET === "1") {
+    await q.run(`UPDATE ${SCHEMA}.admins SET name = ?, password_hash = ? WHERE id = ?`, name, hashPassword(password), existing.id);
+  }
+}
+
+/** Runs once per server instance. */
+function ready(): Promise<void> {
+  globalThis.__rareBookieReady ??= ensureAdmin().catch((e) => {
+    globalThis.__rareBookieReady = undefined;
+    throw e;
+  });
+  return globalThis.__rareBookieReady;
 }

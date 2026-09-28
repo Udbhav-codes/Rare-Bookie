@@ -7,9 +7,8 @@ import { plural, timeAgo } from "@/lib/utils";
 
 export const metadata: Metadata = { title: "Dashboard" };
 
-export default function DashboardPage() {
-  const s = getStats();
-  const recent = getActivity(5);
+export default async function DashboardPage() {
+  const [s, recent] = await Promise.all([getStats(), getActivity(5)]);
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-10 sm:px-6">

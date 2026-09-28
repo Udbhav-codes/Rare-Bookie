@@ -6,10 +6,8 @@ import { CatalogueView } from "./CatalogueView";
 
 export const metadata: Metadata = { title: "Catalogue" };
 
-export default function CataloguePage() {
-  const books = getBooks();
-  const categories = getCategories();
-  const { rackRows } = getLibrarySettings();
+export default async function CataloguePage() {
+  const [books, categories, { rackRows }] = await Promise.all([getBooks(), getCategories(), getLibrarySettings()]);
   return (
     <div className="mx-auto max-w-7xl px-4 pb-16 pt-10 sm:px-6">
       <PageHeader eyebrow="Browse the shelves" title="Catalogue" />

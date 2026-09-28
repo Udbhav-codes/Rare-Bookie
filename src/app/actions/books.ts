@@ -1,12 +1,10 @@
 "use server";
 
 import { randomUUID } from "node:crypto";
-import fs from "node:fs/promises";
-import path from "node:path";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { assertAdmin, NotAdminError } from "@/lib/auth";
-import { get, getSetting, run, transaction, UPLOAD_DIR } from "@/lib/db";
+import { get, getSetting, run, SCHEMA, transaction, type Querier } from "@/lib/db";
 import type { ActionState } from "@/lib/types";
 import { rackLabels, todayISO } from "@/lib/utils";
 
@@ -14,19 +12,27 @@ const str = (fd: FormData, k: string) => String(fd.get(k) ?? "").trim();
 const MAX_COVER_BYTES = 3 * 1024 * 1024;
 const COVER_TYPES: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" };
 
+/** Cover uploads are stored in Postgres and served by /api/covers/[file]. */
 async function saveCover(file: File): Promise<string> {
-  const ext = COVER_TYPES[file.type];
-  const name = `${randomUUID()}.${ext}`;
-  await fs.writeFile(path.join(UPLOAD_DIR, name), Buffer.from(await file.arrayBuffer()));
-  return `/api/covers/${name}`;
+  const id = randomUUID();
+  await run(
+    `INSERT INTO ${SCHEMA}.covers(id, mime, bytes, created_at) VALUES (?, ?, ?, ?)`,
+    id,
+    file.type,
+    Buffer.from(await file.arrayBuffer()),
+    new Date().toISOString(),
+  );
+  return `/api/covers/${id}`;
 }
 
-function resolveCategory(fd: FormData): number | null {
+async function resolveCategory(q: Querier, fd: FormData): Promise<number | null> {
   const choice = str(fd, "category_id");
   if (choice === "__new") {
     const name = str(fd, "new_category");
-    const found = get<{ id: number }>("SELECT id FROM categories WHERE name = ?", name);
-    return found ? found.id : Number(run("INSERT INTO categories(name) VALUES (?)", name).lastInsertRowid);
+    const found = await q.get<{ id: number }>(`SELECT id FROM ${SCHEMA}.categories WHERE lower(name) = lower(?)`, name);
+    if (found) return found.id;
+    const created = await q.get<{ id: number }>(`INSERT INTO ${SCHEMA}.categories(name) VALUES (?) RETURNING id`, name);
+    return created!.id;
   }
   return choice ? Number(choice) : null;
 }
@@ -47,7 +53,7 @@ export async function saveBook(_prev: ActionState, fd: FormData): Promise<Action
     const cover = fd.get("cover_file");
     const coverFile = cover instanceof File && cover.size > 0 ? cover : null;
     const dateAdded = str(fd, "date_added") || todayISO();
-    const racks = rackLabels(Number(getSetting("rack_rows", "4")));
+    const racks = rackLabels(Number(await getSetting("rack_rows", "4")));
 
     const errors: Record<string, string> = {};
     if (!title) errors.title = "Enter the book title.";
@@ -76,18 +82,18 @@ export async function saveBook(_prev: ActionState, fd: FormData): Promise<Action
       rack,
     };
 
-    const saved = transaction((): { id: number; message: string } => {
-      const categoryId = resolveCategory(fd);
+    const saved = await transaction(async (q): Promise<{ id: number; message: string }> => {
+      const categoryId = await resolveCategory(q, fd);
       if (id) {
-        const current = get<{ total_copies: number; available_copies: number }>(
-          "SELECT total_copies, available_copies FROM books WHERE id = ?",
+        const current = await q.get<{ total_copies: number; available_copies: number }>(
+          `SELECT total_copies, available_copies FROM ${SCHEMA}.books WHERE id = ? FOR UPDATE`,
           id,
         );
         if (!current) throw new Error("!This book was deleted by someone else.");
         const out = current.total_copies - current.available_copies;
         if (copies < out) throw new Error(`!${out} ${out === 1 ? "copy is" : "copies are"} lent out right now, so total copies can't go below ${out}.`);
-        run(
-          `UPDATE books SET title=?, author=?, isbn=?, category_id=?, publisher=?, year=?, edition=?, language=?, description=?,
+        await q.run(
+          `UPDATE ${SCHEMA}.books SET title=?, author=?, isbn=?, category_id=?, publisher=?, year=?, edition=?, language=?, description=?,
              cover_url=?, rack_number=?, total_copies=?, available_copies=? WHERE id=?`,
           fields.title,
           fields.author,
@@ -109,10 +115,18 @@ export async function saveBook(_prev: ActionState, fd: FormData): Promise<Action
 
       // Same ISBN already on the shelves? Add copies instead of creating a duplicate record.
       const dup = fields.isbn
-        ? get<{ id: number; title: string; rack_number: string }>("SELECT id, title, rack_number FROM books WHERE isbn = ?", fields.isbn)
+        ? await q.get<{ id: number; title: string; rack_number: string }>(
+            `SELECT id, title, rack_number FROM ${SCHEMA}.books WHERE isbn = ?`,
+            fields.isbn,
+          )
         : undefined;
       if (dup) {
-        run("UPDATE books SET total_copies = total_copies + ?, available_copies = available_copies + ? WHERE id = ?", copies, copies, dup.id);
+        await q.run(
+          `UPDATE ${SCHEMA}.books SET total_copies = total_copies + ?, available_copies = available_copies + ? WHERE id = ?`,
+          copies,
+          copies,
+          dup.id,
+        );
         return {
           id: dup.id,
           message: `“${dup.title}” is already in the library, so ${copies} more ${copies === 1 ? "copy was" : "copies were"} added to it in ${dup.rack_number}.`,
@@ -120,27 +134,25 @@ export async function saveBook(_prev: ActionState, fd: FormData): Promise<Action
       }
 
       const createdAt = dateAdded === todayISO() ? new Date().toISOString() : `${dateAdded}T09:00:00.000Z`;
-      const newId = Number(
-        run(
-          `INSERT INTO books(title, author, isbn, category_id, publisher, year, edition, language, description, cover_url, rack_number, total_copies, available_copies, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          fields.title,
-          fields.author,
-          fields.isbn,
-          categoryId,
-          fields.publisher,
-          fields.year,
-          fields.edition,
-          fields.language,
-          fields.description,
-          coverUrl,
-          fields.rack,
-          copies,
-          copies,
-          createdAt,
-        ).lastInsertRowid,
+      const created = await q.get<{ id: number }>(
+        `INSERT INTO ${SCHEMA}.books(title, author, isbn, category_id, publisher, year, edition, language, description, cover_url, rack_number, total_copies, available_copies, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+        fields.title,
+        fields.author,
+        fields.isbn,
+        categoryId,
+        fields.publisher,
+        fields.year,
+        fields.edition,
+        fields.language,
+        fields.description,
+        coverUrl,
+        fields.rack,
+        copies,
+        copies,
+        createdAt,
       );
-      return { id: newId, message: `Added “${title}” to ${rack}.` };
+      return { id: created!.id, message: `Added “${title}” to ${rack}.` };
     });
 
     revalidatePath("/", "layout");
@@ -161,17 +173,23 @@ export async function deleteBook(_prev: ActionState, fd: FormData): Promise<Acti
   try {
     await assertAdmin();
     const id = Number(fd.get("id"));
-    const book = get<{ title: string; total_copies: number; available_copies: number; cover_url: string | null }>(
-      "SELECT title, total_copies, available_copies, cover_url FROM books WHERE id = ?",
+    const book = await get<{ title: string; total_copies: number; available_copies: number; cover_url: string | null }>(
+      `SELECT title, total_copies, available_copies, cover_url FROM ${SCHEMA}.books WHERE id = ?`,
       id,
     );
     if (!book) return { message: "That book was already deleted." };
-    const active = get<{ n: number }>("SELECT COUNT(*) AS n FROM loans WHERE book_id = ? AND status = 'active'", id)!.n;
-    if (active > 0)
-      return { message: `“${book.title}” has ${active} ${active === 1 ? "copy" : "copies"} lent out. Mark ${active === 1 ? "it" : "them"} as returned before deleting.` };
-    run("DELETE FROM books WHERE id = ?", id);
+    const active = await get<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM ${SCHEMA}.loans WHERE book_id = ? AND status = 'active'`,
+      id,
+    );
+    const outCount = active?.n ?? 0;
+    if (outCount > 0)
+      return {
+        message: `“${book.title}” has ${outCount} ${outCount === 1 ? "copy" : "copies"} lent out. Mark ${outCount === 1 ? "it" : "them"} as returned before deleting.`,
+      };
+    await run(`DELETE FROM ${SCHEMA}.books WHERE id = ?`, id);
     if (book.cover_url?.startsWith("/api/covers/")) {
-      await fs.rm(path.join(UPLOAD_DIR, path.basename(book.cover_url)), { force: true });
+      await run(`DELETE FROM ${SCHEMA}.covers WHERE id = ?`, book.cover_url.split("/").pop());
     }
     revalidatePath("/", "layout");
     return { ok: true, stamp: Date.now(), message: `Deleted “${book.title}”. Its past loans stay in the history.` };

@@ -9,8 +9,13 @@ export const metadata: Metadata = { title: "Collection" };
 
 export default async function CollectionPage({ searchParams }: PageProps<"/manage/collection">) {
   const { saved } = await searchParams;
-  const savedBook = saved ? getBook(Number(saved)) : undefined;
-  const { rackRows, loanDays } = getLibrarySettings();
+  const [savedBook, { rackRows, loanDays }, books, categories, rackSummary] = await Promise.all([
+    saved ? getBook(Number(saved)) : undefined,
+    getLibrarySettings(),
+    getBooks(),
+    getCategories(),
+    getRackSummary(),
+  ]);
 
   return (
     <div className="space-y-14">
@@ -20,13 +25,13 @@ export default async function CollectionPage({ searchParams }: PageProps<"/manag
         </p>
       )}
       <Suspense>
-        <CollectionView books={getBooks()} categories={getCategories()} rackRows={rackRows} />
+        <CollectionView books={books} categories={categories} rackRows={rackRows} />
       </Suspense>
 
       <div className="no-print grid gap-8 lg:grid-cols-2">
-        <RackManager rows={rackRows} summary={getRackSummary()} />
+        <RackManager rows={rackRows} summary={rackSummary} />
         <div className="space-y-8">
-          <CategoryManager categories={getCategories()} />
+          <CategoryManager categories={categories} />
           <LoanDaysForm days={loanDays} />
         </div>
       </div>

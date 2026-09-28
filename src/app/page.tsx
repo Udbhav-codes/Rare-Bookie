@@ -5,11 +5,13 @@ import { RackMap } from "@/components/RackMap";
 import { getLibrarySettings, getNewArrivals, getRackSummary, getStats } from "@/lib/data";
 import { plural } from "@/lib/utils";
 
-export default function Home() {
-  const { rackRows, libraryName } = getLibrarySettings();
-  const summary = getRackSummary();
-  const stats = getStats();
-  const arrivals = getNewArrivals(6);
+export default async function Home() {
+  const [{ rackRows, libraryName }, summary, stats, arrivals] = await Promise.all([
+    getLibrarySettings(),
+    getRackSummary(),
+    getStats(),
+    getNewArrivals(6),
+  ]);
 
   return (
     <>

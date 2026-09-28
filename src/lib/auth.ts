@@ -1,7 +1,7 @@
 import "server-only";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
-import { get } from "./db";
+import { get, SCHEMA } from "./db";
 import { readSessionToken, SESSION_COOKIE } from "./session";
 import type { Admin } from "./types";
 
@@ -9,7 +9,7 @@ export async function getAdmin(): Promise<Admin | null> {
   const token = (await cookies()).get(SESSION_COOKIE)?.value;
   const session = await readSessionToken(token);
   if (!session) return null;
-  return get<Admin>("SELECT id, name, email FROM admins WHERE id = ?", session.adminId) ?? null;
+  return (await get<Admin>(`SELECT id, name, email FROM ${SCHEMA}.admins WHERE id = ?`, session.adminId)) ?? null;
 }
 
 /** For admin pages: bounce to login. */

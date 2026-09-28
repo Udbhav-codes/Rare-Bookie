@@ -9,7 +9,7 @@ export const metadata: Metadata = { title: "Return" };
 
 export default async function ReturnPage({ searchParams }: PageProps<"/manage/return">) {
   const { loan } = await searchParams;
-  const loans = getActiveLoans();
+  const loans = await getActiveLoans();
   const today = todayISO();
   const overdue = loans.filter((l) => loanStatus(l.due_date, today) === "overdue");
 
